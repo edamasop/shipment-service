@@ -2,16 +2,20 @@ package app
 
 import (
 	"context"
-	//delivery "payment-service/internal/delivery/http"
-	"shipment-service/internal/config"
-	//"shipment-service/internal/repository"
-
+	"errors"
+	"net/http"
 	"os"
 	"os/signal"
+	"shipment-service/internal/config"
+	delivery "shipment-service/internal/delivery/http"
+	"shipment-service/internal/repository"
+	"shipment-service/internal/server"
+	"shipment-service/internal/service"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/edamasop/events"
 	"github.com/edamasop/messaging"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
@@ -22,11 +26,16 @@ func Run() {
 	defer cancel()
 
 	cfg := config.Load()
-
 	log := logrus.New()
 	log.SetOutput(os.Stdout)
+	level, err := logrus.ParseLevel(cfg.Loglevel)
+	if err != nil {
+		log.WithError(err).Warn("invalid LOGLEVEL; using info")
+		level = logrus.InfoLevel
+	}
+	log.SetLevel(level)
+	entry := logrus.NewEntry(log)
 
-	// 1. Initialize PostgreSQL
 	dbPool, err := pgxpool.New(ctx, cfg.PostgresDSN)
 	if err != nil {
 		log.Fatalf("Unable to connect to PostgreSQL: %v", err)
@@ -36,49 +45,12 @@ func Run() {
 	if err := dbPool.Ping(ctx); err != nil {
 		log.Fatalf("PostgreSQL ping failed: %v", err)
 	}
-	log.Info("Successfully connected to PostgreSQL")
-
-	consumerCfg := messaging.ConsumerConfig{
-
-		BootstrapServers: strings.Join(cfg.KafkaBrokers, ","),
-		GroupID:          cfg.KafkaGroupID,
-		Topics:           []string{cfg.KafkaConsumerTopic},
-		EnableLogging:    false,
-		LogOutput:        os.Stdout,
-		ManualCommit:     true,
-		MaxRetries:       3,
-		ErrorBackoff:     2 * time.Second,
-		ReadTimeout:      5 * time.Second,
-
-		EnableDLQ: true,
-		DLQTopic:  cfg.KafkaConsumerTopic + ".dlq",
-
-		HealthCheckInterval:       15 * time.Second,
-		UnhealthyFailureThreshold: 5,
-		HealthFailureWindow:       1 * time.Minute,
-	}
-
-	consumer, err := messaging.NewKafkaConsumer(consumerCfg)
-	if err != nil {
-		log.Fatalf("Failed to initialize Kafka consumer: %v", err)
-	}
-
-	go func() {
-		log.Info("Starting message consumption engine...")
-		consumer.Start(ctx)
-	}()
-
-	defer func() {
-		log.Info("Cleaning up resources and shutting down messaging nodes...")
-		if err := consumer.Close(); err != nil {
-			log.Errorf("Error while stopping consumer gracefully: %v", err)
-		}
-	}()
+	log.Info("connected to PostgreSQL")
 
 	producerCfg := messaging.ProducerConfig{
 		BootstrapServers:       strings.Join(cfg.KafkaBrokers, ","),
 		Topic:                  cfg.KafkaProducerTopic,
-		EnableLogging:          false,
+		EnableLogging:          true,
 		LogOutput:              os.Stdout,
 		ErrOutput:              os.Stderr,
 		MaxAttempts:            3,
@@ -89,36 +61,69 @@ func Run() {
 	if err != nil {
 		log.Fatalf("Failed to initialize Kafka producer: %v", err)
 	}
-	defer func() {
-		if err := producer.Close(); err != nil {
-			log.Errorf("Error while stopping producer gracefully: %v", err)
-		}
+	log.Info("connected to Kafka producer")
+
+	repos := repository.NewRepository(dbPool)
+	services := service.NewServices(repos, entry)
+	paymentConsumer := service.NewPaymentConsumer(services.Shipment, entry)
+	consumer, err := messaging.NewKafkaConsumer(messaging.ConsumerConfig{
+		BootstrapServers: strings.Join(cfg.KafkaBrokers, ","),
+		GroupID:          cfg.KafkaGroupID,
+		Topics:           []string{cfg.KafkaConsumerTopic},
+		EnableLogging:    true,
+		LogOutput:        os.Stdout,
+		ErrOutput:        os.Stderr,
+		ManualCommit:     true,
+		MaxRetries:       3,
+		ErrorBackoff:     2 * time.Second,
+		ReadTimeout:      5 * time.Second,
+		EnableDLQ:        true,
+		DLQTopic:         cfg.KafkaConsumerTopic + ".dlq",
+	})
+	
+	if err != nil {
+		log.Fatalf("create Kafka consumer: %v", err)
+	}
+
+	consumer.RegisterHandler(string(events.PaymentStatusSuccessful), paymentConsumer.HandlePaymentSuccessful)
+	go consumer.Start(ctx)
+	log.WithField("topic", cfg.KafkaConsumerTopic).Info("Kafka payment consumer started")
+
+	handlers := delivery.NewHandlers(services, entry)
+	svr, err := server.NewServer(cfg, delivery.NewRouter(handlers))
+	if err != nil {
+		log.Fatalf("create HTTP server: %v", err)
+	}
+
+	poller := service.NewOutboxPoller(repos.Outbox, producer, entry)
+	poller.Start(ctx)
+
+	serverErr := make(chan error, 1)
+	go func() {
+		log.WithField("port", cfg.Port).Info("HTTP server started")
+		serverErr <- svr.Run()
 	}()
 
-	producer.Health()
-	log.Info("Successfully connected to Kafka producer")
+	select {
+	case <-ctx.Done():
+		log.Info("shutdown signal received")
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.WithError(err).Error("HTTP server stopped unexpectedly")
+		}
+	}
 
-	//repositories := repository.NewRepositories(dbPool)
-	//services := service.NewServices(cfg, repositories, log)
-	//handlers := delivery.NewHandlers(services)
-	//outboxPoller := service.NewOutboxPoller(repositories.Outbox, producer, logrus.NewEntry(log))
-	//outboxPoller.Start(ctx)
-
-	//router := delivery.NewRouter(handlers)
-	//svr, err := server.NewServer(cfg, router)
-	//if err != nil {
-	//	log.Fatalf("Unable to init svr: %v", err)
-	//}
-	//
-	//go func() {
-	//	log.Info("Successfully started server on port: ", cfg.Port)
-	//	err = svr.Run()
-	//	if err != nil && err != http.ErrServerClosed {
-	//		log.Fatalf("Unable to start svr: %v", err)
-	//	}
-	//}()
-	//
-	//<-ctx.Done()
-	//log.Info("Shutting down signal received...")
-	//defer svr.Shutdown(ctx)
+	cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if err := svr.Shutdown(shutdownCtx); err != nil {
+		log.WithError(err).Error("graceful HTTP shutdown failed")
+	}
+	poller.Wait()
+	if err := consumer.Close(); err != nil {
+		log.WithError(err).Error("close Kafka consumer")
+	}
+	if err := producer.Close(); err != nil {
+		log.WithError(err).Error("close Kafka producer")
+	}
 }

@@ -1,0 +1,460 @@
+commit ab252b6e8bac45e96adeb457f0244fe528e4364f
+Author: Sayan80bayev <sayan123serv@gmail.com>
+Date:   Sun Aug 2 21:26:21 2026 +0500
+
+    feat: repository layer
+
+diff --git a/internal/model/outbox.go b/internal/model/outbox.go
+new file mode 100644
+index 0000000..5345a65
+--- /dev/null
++++ b/internal/model/outbox.go
+@@ -0,0 +1,14 @@
++package model
++
++import "time"
++
++type OutboxEvent struct {
++	ID          int64
++	OrderID     int64
++	CustomerID  int64
++	EventType   string
++	Payload     []byte
++	CreatedAt   time.Time
++	ProcessedAt *time.Time
++	Published   bool
++}
+diff --git a/internal/model/shipment.go b/internal/model/shipment.go
+new file mode 100644
+index 0000000..d210f17
+--- /dev/null
++++ b/internal/model/shipment.go
+@@ -0,0 +1,27 @@
++package model
++
++import (
++	"time"
++)
++
++type ShipmentStatus string
++
++const (
++	ShipmentStatusPending   ShipmentStatus = "PENDING"
++	ShipmentStatusShipping  ShipmentStatus = "SHIPPING"
++	ShipmentStatusDelivered ShipmentStatus = "DELIVERED"
++	ShipmentStatusFailed    ShipmentStatus = "FAILED"
++	ShipmentStatusCancelled ShipmentStatus = "CANCELLED"
++)
++
++type Shipment struct {
++	ID         int64          `json:"id"`
++	OrderID    int64          `json:"order_id"`
++	CustomerID int64          `json:"customer_id"`
++	Status     ShipmentStatus `json:"status"`
++
++	CreatedAt   time.Time  `json:"created_at"`
++	UpdatedAt   time.Time  `json:"updated_at"`
++	ShippedAt   *time.Time `json:"shipped_at,omitempty"`
++	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
++}
+diff --git a/internal/repository/postgres/outbox_repository.go b/internal/repository/postgres/outbox_repository.go
+new file mode 100644
+index 0000000..41f21b4
+--- /dev/null
++++ b/internal/repository/postgres/outbox_repository.go
+@@ -0,0 +1,149 @@
++package postgres
++
++import (
++	"context"
++	"shipment-service/internal/model"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgxpool"
++)
++
++type OutboxRepository struct {
++	db *pgxpool.Pool
++}
++
++func NewOutboxRepository(db *pgxpool.Pool) *OutboxRepository {
++	return &OutboxRepository{
++		db: db,
++	}
++}
++
++func (r *OutboxRepository) querier(ctx context.Context) Querier {
++	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
++		return tx
++	}
++
++	return r.db
++}
++
++func (r *OutboxRepository) Create(ctx context.Context, event *model.OutboxEvent) error {
++	q := r.querier(ctx)
++	err := q.QueryRow(
++		ctx,
++		`INSERT INTO payment_outbox (order_id, customer_id, event_type, payload)
++		VALUES ($1, $2, $3, $4)
++		RETURNING id, created_at, processed_at`,
++		event.OrderID,
++		event.CustomerID,
++		event.EventType,
++		event.Payload,
++	).Scan(&event.ID, &event.CreatedAt, &event.ProcessedAt)
++
++	return err
++}
++
++func (r *OutboxRepository) GetByID(ctx context.Context, id int64) (*model.OutboxEvent, error) {
++	event := new(model.OutboxEvent)
++	q := r.querier(ctx)
++	err := q.QueryRow(
++		ctx,
++		`SELECT id,
++		   order_id,
++		   customer_id, 
++		   event_type, 
++		   payload, 
++		   created_at, 
++		   processed_at, 
++		   published 
++		FROM payment_outbox 
++		WHERE id = $1`,
++		id,
++	).Scan(
++		&event.ID,
++		&event.OrderID,
++		&event.CustomerID,
++		&event.EventType,
++		&event.Payload,
++		&event.CreatedAt,
++		&event.ProcessedAt,
++		&event.Published)
++
++	return event, err
++}
++
++func (r *OutboxRepository) Update(ctx context.Context, event *model.OutboxEvent) error {
++	q := r.querier(ctx)
++	_, err := q.Exec(ctx, `
++	UPDATE payment_outbox 
++	SET order_id = $2, 
++	    customer_id = $3, 
++	    event_type = $4,
++	    payload = $5, 
++	    updated_at = now(), 
++	    published = $6
++	WHERE id = $1`,
++		event.ID, event.OrderID, event.CustomerID, event.EventType, event.Payload, event.Published)
++
++	return err
++}
++
++func (r *OutboxRepository) Delete(ctx context.Context, id int64) error {
++	q := r.querier(ctx)
++	_, err := q.Exec(ctx, `
++	DELETE FROM payment_outbox
++	WHERE id = $1`,
++		id)
++
++	return err
++}
++
++func (r *OutboxRepository) GetUnpublished(ctx context.Context, limit int) ([]*model.OutboxEvent, error) {
++	q := r.querier(ctx)
++
++	rows, err := q.Query(ctx,
++		`SELECT id,
++		order_id,
++		customer_id,
++		event_type,
++		payload,
++		created_at,
++		processed_at,
++		published FROM payment_outbox WHERE published = FALSE LIMIT $1`, limit,
++	)
++
++	if err != nil {
++		return nil, err
++	}
++
++	defer rows.Close()
++
++	var events []*model.OutboxEvent
++	for rows.Next() {
++		event := new(model.OutboxEvent)
++
++		err := rows.Scan(
++			&event.ID,
++			&event.OrderID,
++			&event.CustomerID,
++			&event.EventType,
++			&event.Payload,
++			&event.CreatedAt,
++			&event.ProcessedAt,
++			&event.Published,
++		)
++
++		if err != nil {
++			return nil, err
++		}
++
++		events = append(events, event)
++	}
++
++	return events, nil
++}
++
++func (r *OutboxRepository) MarkPublished(ctx context.Context, id int64) error {
++	q := r.querier(ctx)
++	_, err := q.Exec(ctx, `UPDATE payment_outbox SET published = TRUE, processed_at = now() WHERE ID = $1`, id)
++	return err
++}
+diff --git a/internal/repository/postgres/quierier.go b/internal/repository/postgres/quierier.go
+new file mode 100644
+index 0000000..a838120
+--- /dev/null
++++ b/internal/repository/postgres/quierier.go
+@@ -0,0 +1,14 @@
++package postgres
++
++import (
++	"context"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++)
++
++type Querier interface {
++	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
++	Query(context.Context, string, ...any) (pgx.Rows, error)
++	QueryRow(context.Context, string, ...any) pgx.Row
++}
+diff --git a/internal/repository/postgres/shipment_repository.go b/internal/repository/postgres/shipment_repository.go
+new file mode 100644
+index 0000000..a6d97f4
+--- /dev/null
++++ b/internal/repository/postgres/shipment_repository.go
+@@ -0,0 +1,154 @@
++package postgres
++
++import (
++	"context"
++	"shipment-service/internal/model"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgxpool"
++)
++
++type ShipmentRepository struct {
++	db *pgxpool.Pool
++}
++
++func NewShipmentRepository(db *pgxpool.Pool) *ShipmentRepository {
++	return &ShipmentRepository{
++		db: db,
++	}
++}
++
++func (r *ShipmentRepository) querier(ctx context.Context) Querier {
++	if tx, ok := ctx.Value(txKey{}).(pgx.Tx); ok {
++		return tx
++	}
++
++	return r.db
++}
++
++func (r *ShipmentRepository) Create(ctx context.Context, shipment *model.Shipment) error {
++	q := r.querier(ctx)
++
++	return q.QueryRow(ctx, `
++		INSERT INTO shipments
++		(order_id, customer_id, status, shipped_at, delivered_at)
++		VALUES ($1, $2, $3, $4, $5)
++		RETURNING id, created_at, updated_at`,
++		shipment.OrderID,
++		shipment.CustomerID,
++		shipment.Status,
++		shipment.ShippedAt,
++		shipment.DeliveredAt,
++	).Scan(
++		&shipment.ID,
++		&shipment.CreatedAt,
++		&shipment.UpdatedAt,
++	)
++}
++
++func (r *ShipmentRepository) GetByID(ctx context.Context, id int64) (*model.Shipment, error) {
++	q := r.querier(ctx)
++
++	shipment := new(model.Shipment)
++
++	err := q.QueryRow(ctx, `
++		SELECT
++			id,
++			order_id,
++			customer_id,
++			status,
++			created_at,
++			updated_at,
++			shipped_at,
++			delivered_at
++		FROM shipments
++		WHERE id=$1`,
++		id,
++	).Scan(
++		&shipment.ID,
++		&shipment.OrderID,
++		&shipment.CustomerID,
++		&shipment.Status,
++		&shipment.CreatedAt,
++		&shipment.UpdatedAt,
++		&shipment.ShippedAt,
++		&shipment.DeliveredAt,
++	)
++
++	if err != nil {
++		return nil, err
++	}
++
++	return shipment, nil
++}
++
++func (r *ShipmentRepository) GetByOrderID(ctx context.Context, orderID int64) (*model.Shipment, error) {
++	q := r.querier(ctx)
++
++	shipment := new(model.Shipment)
++
++	err := q.QueryRow(ctx, `
++		SELECT
++			id,
++			order_id,
++			customer_id,
++			status,
++			created_at,
++			updated_at,
++			shipped_at,
++			delivered_at
++		FROM shipments
++		WHERE order_id=$1`,
++		orderID,
++	).Scan(
++		&shipment.ID,
++		&shipment.OrderID,
++		&shipment.CustomerID,
++		&shipment.Status,
++		&shipment.CreatedAt,
++		&shipment.UpdatedAt,
++		&shipment.ShippedAt,
++		&shipment.DeliveredAt,
++	)
++
++	if err != nil {
++		return nil, err
++	}
++
++	return shipment, nil
++}
++
++func (r *ShipmentRepository) Update(ctx context.Context, shipment *model.Shipment) error {
++	q := r.querier(ctx)
++
++	_, err := q.Exec(ctx, `
++		UPDATE shipments
++		SET
++			order_id=$2,
++			customer_id=$3,
++			status=$4,
++			shipped_at=$5,
++			delivered_at=$6,
++			updated_at=now()
++		WHERE id=$1`,
++		shipment.ID,
++		shipment.OrderID,
++		shipment.CustomerID,
++		shipment.Status,
++		shipment.ShippedAt,
++		shipment.DeliveredAt,
++	)
++
++	return err
++}
++
++func (r *ShipmentRepository) Delete(ctx context.Context, id int64) error {
++	q := r.querier(ctx)
++
++	_, err := q.Exec(ctx,
++		`DELETE FROM shipments WHERE id=$1`,
++		id,
++	)
++
++	return err
++}
+diff --git a/internal/repository/postgres/tx.go b/internal/repository/postgres/tx.go
+new file mode 100644
+index 0000000..03dac1c
+--- /dev/null
++++ b/internal/repository/postgres/tx.go
+@@ -0,0 +1,40 @@
++package postgres
++
++import (
++	"context"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgxpool"
++)
++
++type txKey struct{}
++
++type TxManager struct {
++	db *pgxpool.Pool
++}
++
++func NewTxManager(db *pgxpool.Pool) *TxManager {
++	return &TxManager{
++		db: db,
++	}
++}
++
++func (m *TxManager) WithinTransaction(
++	ctx context.Context,
++	fn func(ctx context.Context) error,
++) error {
++	tx, err := m.db.BeginTx(ctx, pgx.TxOptions{})
++	if err != nil {
++		return err
++	}
++
++	defer tx.Rollback(ctx)
++
++	ctx = context.WithValue(ctx, txKey{}, tx)
++
++	if err := fn(ctx); err != nil {
++		return err
++	}
++
++	return tx.Commit(ctx)
++}
+diff --git a/internal/repository/repository.go b/internal/repository/repository.go
+new file mode 100644
+index 0000000..50a4378
+--- /dev/null
++++ b/internal/repository/repository.go
+@@ -0,0 +1 @@
++package repository
+diff --git a/internal/repository/tx.go b/internal/repository/tx.go
+new file mode 100644
+index 0000000..e069a95
+--- /dev/null
++++ b/internal/repository/tx.go
+@@ -0,0 +1,7 @@
++package repository
++
++import "context"
++
++type TxManager interface {
++	WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error
++}

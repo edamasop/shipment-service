@@ -15,11 +15,13 @@ type Server struct {
 func NewServer(cfg *config.Config, handler http.Handler) (*Server, error) {
 	return &Server{
 		server: &http.Server{
-			Addr:           fmt.Sprintf(":%s", cfg.Port),
-			Handler:        handler,
-			ReadTimeout:    30 * time.Second,
-			WriteTimeout:   60 * time.Second,
-			MaxHeaderBytes: 2 << 20, // 2MB
+			Addr:              fmt.Sprintf(":%s", cfg.Port),
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    2 << 20, // 2MB
 		},
 	}, nil
 }

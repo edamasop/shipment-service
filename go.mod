@@ -2,8 +2,8 @@ module shipment-service
 
 go 1.26
 
-
 require (
+	github.com/edamasop/events v0.0.0-20260808155640-5daae380ac89
 	github.com/edamasop/messaging v0.0.0-20260725181826-8ff0ed2e25db
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
@@ -11,7 +11,6 @@ require (
 )
 
 require (
-	github.com/edamasop/events v0.0.0-20260625163704-8dd24ddd9454 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

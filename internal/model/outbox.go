@@ -11,4 +11,6 @@ type OutboxEvent struct {
 	CreatedAt   time.Time
 	ProcessedAt *time.Time
 	Published   bool
+	LockedUntil *time.Time
+	Attempts    int
 }

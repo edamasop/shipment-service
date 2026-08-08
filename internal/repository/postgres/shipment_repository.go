@@ -82,6 +82,44 @@ func (r *ShipmentRepository) GetByID(ctx context.Context, id int64) (*model.Ship
 	return shipment, nil
 }
 
+// GetByIDForUpdate is used only from a transaction when a status transition
+// must be serialized with other updates to the same shipment.
+func (r *ShipmentRepository) GetByIDForUpdate(ctx context.Context, id int64) (*model.Shipment, error) {
+	q := r.querier(ctx)
+
+	shipment := new(model.Shipment)
+
+	err := q.QueryRow(ctx, `
+		SELECT
+			id,
+			order_id,
+			customer_id,
+			status,
+			created_at,
+			updated_at,
+			shipped_at,
+			delivered_at
+		FROM shipments
+		WHERE id=$1
+		FOR UPDATE`,
+		id,
+	).Scan(
+		&shipment.ID,
+		&shipment.OrderID,
+		&shipment.CustomerID,
+		&shipment.Status,
+		&shipment.CreatedAt,
+		&shipment.UpdatedAt,
+		&shipment.ShippedAt,
+		&shipment.DeliveredAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return shipment, nil
+}
+
 func (r *ShipmentRepository) GetByOrderID(ctx context.Context, orderID int64) (*model.Shipment, error) {
 	q := r.querier(ctx)
 
@@ -121,7 +159,7 @@ func (r *ShipmentRepository) GetByOrderID(ctx context.Context, orderID int64) (*
 func (r *ShipmentRepository) Update(ctx context.Context, shipment *model.Shipment) error {
 	q := r.querier(ctx)
 
-	_, err := q.Exec(ctx, `
+	err := q.QueryRow(ctx, `
 		UPDATE shipments
 		SET
 			order_id=$2,
@@ -130,14 +168,15 @@ func (r *ShipmentRepository) Update(ctx context.Context, shipment *model.Shipmen
 			shipped_at=$5,
 			delivered_at=$6,
 			updated_at=now()
-		WHERE id=$1`,
+		WHERE id=$1
+		RETURNING updated_at`,
 		shipment.ID,
 		shipment.OrderID,
 		shipment.CustomerID,
 		shipment.Status,
 		shipment.ShippedAt,
 		shipment.DeliveredAt,
-	)
+	).Scan(&shipment.UpdatedAt)
 
 	return err
 }
