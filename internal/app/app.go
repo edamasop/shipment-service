@@ -35,6 +35,7 @@ func Run() {
 	}
 	log.SetLevel(level)
 	entry := logrus.NewEntry(log)
+	startedAt := time.Now()
 
 	dbPool, err := pgxpool.New(ctx, cfg.PostgresDSN)
 	if err != nil {
@@ -89,14 +90,26 @@ func Run() {
 	go consumer.Start(ctx)
 	log.WithField("topic", cfg.KafkaConsumerTopic).Info("Kafka payment consumer started")
 
-	handlers := delivery.NewHandlers(services, entry)
-	svr, err := server.NewServer(cfg, delivery.NewRouter(handlers))
+	poller := service.NewOutboxPoller(repos.Outbox, producer, entry)
+	poller.Start(ctx)
+
+	handlerChain := delivery.NewRouter(delivery.NewHandlers(services, entry), delivery.Options{
+		AllowedOrigins: cfg.AllowedOrigins,
+		Monitoring: delivery.MonitoringDeps{
+			Service:  "shipment-service",
+			DB:       dbPool,
+			Consumer: consumer,
+			Producer: producer,
+			Outbox:   poller,
+			Log:      entry,
+			Started:  startedAt,
+		},
+	})
+
+	svr, err := server.NewServer(cfg, handlerChain)
 	if err != nil {
 		log.Fatalf("create HTTP server: %v", err)
 	}
-
-	poller := service.NewOutboxPoller(repos.Outbox, producer, entry)
-	poller.Start(ctx)
 
 	serverErr := make(chan error, 1)
 	go func() {
