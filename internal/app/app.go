@@ -80,7 +80,7 @@ func Run() {
 		EnableDLQ:        true,
 		DLQTopic:         cfg.KafkaConsumerTopic + ".dlq",
 	})
-	
+
 	if err != nil {
 		log.Fatalf("create Kafka consumer: %v", err)
 	}

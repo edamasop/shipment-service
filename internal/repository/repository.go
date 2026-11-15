@@ -26,6 +26,9 @@ type Outbox interface {
 	GetUnpublished(ctx context.Context, limit int) ([]*model.OutboxEvent, error)
 	ClaimUnpublished(ctx context.Context, limit int, lease time.Duration) ([]*model.OutboxEvent, error)
 	MarkPublished(ctx context.Context, id int64) error
+	Park(ctx context.Context, id int64, reason string) error
+	DeletePublishedBefore(ctx context.Context, before time.Time) (int64, error)
+	CountPending(ctx context.Context) (pending int64, parked int64, err error)
 }
 
 type Repository struct {
