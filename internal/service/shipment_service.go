@@ -162,8 +162,7 @@ func (s *ShipmentService) StartDelivery(ctx context.Context, orderID, customerID
 			Status:     model.ShipmentStatusShipping,
 		}
 
-		now := s.now().UTC()
-		shipment.ShippedAt = &now
+		shipment.ShippedAt = new(s.now().UTC())
 
 		if err := s.shipmentRepository.Create(txCtx, shipment); err != nil {
 			if isUniqueViolation(err) {
