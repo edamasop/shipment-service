@@ -34,6 +34,11 @@ func Run() {
 		level = logrus.InfoLevel
 	}
 	log.SetLevel(level)
+
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+
 	entry := logrus.NewEntry(log)
 	startedAt := time.Now()
 
@@ -70,7 +75,7 @@ func Run() {
 	consumer, err := messaging.NewKafkaConsumer(messaging.ConsumerConfig{
 		BootstrapServers: strings.Join(cfg.KafkaBrokers, ","),
 		GroupID:          cfg.KafkaGroupID,
-		Topics:           []string{cfg.KafkaConsumerTopic},
+		Topics:           cfg.KafkaConsumerTopics,
 		EnableLogging:    true,
 		LogOutput:        os.Stdout,
 		ErrOutput:        os.Stderr,
@@ -79,7 +84,7 @@ func Run() {
 		ErrorBackoff:     2 * time.Second,
 		ReadTimeout:      5 * time.Second,
 		EnableDLQ:        true,
-		DLQTopic:         cfg.KafkaConsumerTopic + ".dlq",
+		DLQTopic:         cfg.KafkaProducerTopic + ".dlq",
 	})
 
 	if err != nil {
@@ -88,7 +93,7 @@ func Run() {
 
 	consumer.RegisterHandler(string(events.PaymentStatusSuccessful), paymentConsumer.HandlePaymentSuccessful)
 	go consumer.Start(ctx)
-	log.WithField("topic", cfg.KafkaConsumerTopic).Info("Kafka payment consumer started")
+	log.WithField("topics", cfg.KafkaConsumerTopics).Info("Kafka payment consumer started")
 
 	poller := service.NewOutboxPoller(repos.Outbox, producer, entry)
 	poller.Start(ctx)
